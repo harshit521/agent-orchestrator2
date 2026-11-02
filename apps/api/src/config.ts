@@ -146,7 +146,10 @@ export interface AppConfig {
   git: GitConfig;
   security: {
     enabled: boolean;
-  };
+    policy: "fail-closed" | "warn-only"; // fail-closed blocks on blocking findings, warn-only reports warnings
+    scanners?: string[]; // explicitly enabled scanners, defaults to all configured
+    scanTimeoutMs: number;
+  },
 }
 
 export class ConfigError extends Error {

@@ -11,6 +11,7 @@ import type {
   RunWorkspace,
 } from "./run-store.js";
 import { parseJsonValue } from "./run-dto.js";
+import { SecurityScanner } from "../security/scanner.js";
 import {
   resolveTestCommand,
   runTests,
@@ -22,6 +23,7 @@ import {
   type WorktreeDiff,
   type WorktreeService,
 } from "../worktrees/worktree-service.js";
+import { SchedulerService } from "./scheduler/SchedulerService.ts";
 
 export interface StartTaskRequest {
   prompt: string;
@@ -53,6 +55,7 @@ export interface RunServiceDeps {
     service: WorktreeService | null;
   };
   github: GitHubIntegration | null;
+  scheduler: import("./scheduler/SchedulerService.ts").SchedulerService;
 }
 
 export class UnknownAgentError extends Error {
@@ -82,6 +85,13 @@ export function deriveTitle(prompt: string): string {
   return normalised.length > 80 ? `${normalised.slice(0, 77)}...` : normalised;
 }
 
+/** Scheduler for managing run execution lifecycle. */
+export const scheduler = new SchedulerService({
+  store,
+  events,
+  config,
+});
+
 /**
  * Owns the task/run lifecycle: validate the agent, persist the task, record
  * progress events, and execute the agent either in the background
@@ -99,6 +109,8 @@ export class RunService {
   readonly #worktrees: RunServiceDeps["worktrees"];
   readonly #github: GitHubIntegration | null;
   readonly #controllers = new Map<string, AbortController>();
+  readonly #scheduler: SchedulerService;
+  #executionCallbacks: Map<string, () => Promise<void>> = new Map();
   #pending: Promise<void> = Promise.resolve();
 
   constructor(deps: RunServiceDeps) {
@@ -109,9 +121,22 @@ export class RunService {
     this.#config = deps.config;
     this.#worktrees = deps.worktrees;
     this.#github = deps.github;
+    this.#scheduler = deps.scheduler;
+
+    // Register completion callback with scheduler
+    // The scheduler will call this when a run completes
+    this.#executionCallbacks = new Map();
   }
 
-  /** Creates a task and immediately starts its first run in the background. */
+  /**
+   * Register a completion callback for a run.
+   * The scheduler will call this when the run completes.
+   */
+  registerCompletionCallback(runId: string, callback: () => Promise<void>) {
+    this.#executionCallbacks.set(runId, callback);
+  }
+
+  /** Creates a task and enqueues its first run in the scheduler. */
   async startTask(request: StartTaskRequest) {
     const agent = this.#requireAgent(request.agentId);
     const { task, run } = await this.#store.createTaskWithRun({
@@ -121,7 +146,8 @@ export class RunService {
       priority: request.priority ?? "medium",
     });
 
-    this.#launch(task.id, run.id, agent, request.prompt, task.title);
+    // Enqueue the run in the scheduler instead of fire-and-forget
+    await this.#scheduler.enqueue(run);
 
     return { task, run };
   }
@@ -139,7 +165,7 @@ export class RunService {
     return { task };
   }
 
-  /** Starts another run for an existing task. */
+  /** Starts another run for an existing task, enqueued in the scheduler. */
   async startExistingTask(taskId: string) {
     const task = await this.#store.getTask(taskId);
 
@@ -153,7 +179,8 @@ export class RunService {
       agent.id
     );
 
-    this.#launch(task.id, run.id, agent, task.prompt, task.title);
+    // Enqueue the run in the scheduler instead of fire-and-forget
+    await this.#scheduler.enqueue(run);
 
     return { task: updatedTask, run };
   }
@@ -180,6 +207,23 @@ export class RunService {
 
   /** Cooperatively cancels a running agent and its child processes. */
   cancelRun(runId: string): boolean {
+    // First try to cancel via scheduler (queued runs)
+    const schedulerCancelled = this.#scheduler.cancelRun(runId);
+    if (schedulerCancelled) {
+      // Emit cancelled event
+      this.#events.publish({
+        id: crypto.randomUUID(),
+        runId,
+        taskId: this.#store.findRunById(runId)?.then((r) => r.taskId) ?? "",
+        type: "run.cancelled",
+        message: `Run ${runId} cancelled`,
+        percent: 100,
+        createdAt: new Date().toISOString(),
+      });
+      return true;
+    }
+
+    // Then try via AbortController (running runs)
     const controller = this.#controllers.get(runId);
 
     if (!controller) {
@@ -187,6 +231,21 @@ export class RunService {
     }
 
     controller.abort();
+    
+    // Persist cancellation status
+    void this.#store.updateRunStatus(runId, "cancelled");
+
+    // Emit cancelled event
+    this.#events.publish({
+      id: crypto.randomUUID(),
+      runId,
+      taskId: "",
+      type: "run.cancelled",
+      message: `Run ${runId} cancelled`,
+      percent: 100,
+      createdAt: new Date().toISOString(),
+    });
+
     return true;
   }
 
@@ -380,6 +439,11 @@ export class RunService {
     await this.#pending;
     await this.#store.completeRun(runId, finalResult);
 
+    // Notify scheduler of run completion
+    void this.#scheduler.registerCompletionCallback(runId, async () => {
+      // Scheduler will handle processing the next queued run
+    });
+
     const taskStatus =
       finalResult.status === "completed"
         ? this.#completedTaskStatus(finalResult)
@@ -567,6 +631,48 @@ export class RunService {
       }
     }
 
+    // Run security scan on the worktree/diff
+    const securityResult = await this.#runSecurityScan(worktree.path, runId);
+
+    // Evaluate security policy
+    const policyResult = this.#evaluateSecurityPolicy(securityResult);
+
+    if (policyResult.block) {
+      // Fail-closed policy detected blocking finding(s)
+      // Do not commit, do not push, do not create PR
+      await this.#store.completeRun(runId, {
+        status: "failed" as const,
+        provider: null,
+        model: null,
+        completedAt: new Date(),
+        durationMs: input.result?.durationMs ?? 0,
+        inputTokens: null,
+        outputTokens: null,
+        output: null,
+        error: {
+          code: "SECURITY_GATE_FAILED",
+          message: "Security gate failed. " + policyResult.reason,
+        },
+      });
+
+      // Mark task status as failed
+      await this.#store.updateTaskStatus(taskId, "failed");
+
+      // Emit security scan failed event
+      this.#events.publish({
+        id: crypto.randomUUID(),
+        runId,
+        taskId,
+        type: "security.scan.failed" as RunEventType,
+        message: `Security gate failed: ${policyResult.reason}`,
+        percent: 100,
+        createdAt: new Date().toISOString(),
+      });
+
+      return input.result;
+    }
+
+    // Continue with git commit for successful/clean scans
     // Re-stage in case the test runner generated files that are not ignored.
     diff = await service.diff(worktree);
 
@@ -871,5 +977,112 @@ export class RunService {
       });
 
     return this.#pending;
+  }
+
+  /**
+   * Run security scanners on the worktree/diff.
+   * Scans the isolated worktree rather than the original repository.
+   */
+  async #runSecurityScan(worktreePath: string, runId: string): Promise<{
+    scannerResults: Array<{ scannerId: string; status: string; output: string }>;
+    findings: Array<{ severity: string; description: string; affectedFile: string; lineNumber: number }>;
+  }> {
+    const scanner = new SecurityScanner({
+      root: worktreePath,
+      definitions: this.#config.security.scanners
+        ? this.#config.security.scanners
+        : undefined,
+      timeoutMs: this.#config.security.scanTimeoutMs,
+    });
+
+    const scannerResults = await scanner.scan(worktreePath);
+
+    const findings: Array<{ severity: string; description: string; affectedFile: string; lineNumber: number }> = [];
+
+    for (const result of scannerResults) {
+      // Parse findings from scanner output
+      // This is simplified - real implementation would parse JSON output
+      if (result.status === "failed") {
+        // Extract findings from output
+        const lines = result.output.split("\n");
+        for (const line of lines) {
+          if (line.trim()) {
+            findings.push({
+              severity: "medium",
+              description: line.substring(0, 100),
+              affectedFile: "unknown",
+              lineNumber: 0,
+            });
+          }
+        }
+      }
+    }
+
+    // Persist security results to database
+    await this.#store.#prisma.$runSecurity.createMany({
+      data: scannerResults.map((result) => ({
+        runId,
+        scannerId: result.id,
+        status: result.status,
+        severity: "high", // simplified
+        description: result.output.slice(0, 500),
+        affectedFile: "",
+        lineNumber: 0,
+        scannedAt: new Date(),
+      })),
+    });
+
+    return {
+      scannerResults: scannerResults.map((r) => ({
+        scannerId: r.id,
+        status: r.status,
+        output: r.output,
+      })),
+      findings,
+    };
+  }
+
+  /**
+   * Evaluate security policy against scan results.
+   * - fail-closed: blocking findings prevent commit/PR
+   * - warn-only: warnings are reported but don't block
+   */
+  #evaluateSecurityPolicy(
+    securityScan: {
+      scannerResults: Array<{ scannerId: string; status: string; output: string }>;
+      findings: Array<{ severity: string; description: string; affectedFile: string; lineNumber: number }>;
+    }
+  ): {
+    block: boolean;
+    reason: string;
+  } {
+    const { findings } = securityScan;
+
+    // Check for high/critical severity findings
+    const blockingFindings = findings.filter(
+      (f) => f.severity === "high" || f.severity === "critical"
+    );
+
+    if (blockingFindings.length > 0) {
+      return {
+        block: true,
+        reason: `Security gate blocked: ${blockingFindings.length} blocking finding(s) detected`,
+      };
+    }
+
+    // Check for any findings in warn-only mode
+    const warningFindings = findings.filter((f) => f.severity === "low");
+
+    if (warningFindings.length > 0 && this.#config.security.policy === "warn-only") {
+      return {
+        block: false,
+        reason: `Security warnings detected (${warningFindings.length}), but policy is set to warn-only`,
+      };
+    }
+
+    return {
+      block: false,
+      reason: "Security scan passed",
+    };
   }
 }

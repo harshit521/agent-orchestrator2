@@ -17,7 +17,8 @@ export type RunEventType =
   | "agent.completed"
   | "agent.failed"
   | "run.completed"
-  | "run.failed";
+  | "run.failed"
+  | "run.cancelled";
 
 export interface RunEvent {
   id?: string;

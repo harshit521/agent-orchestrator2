@@ -32,7 +32,7 @@ model Run {
   id              String    @id @default(cuid())
   taskId          String
   agentId         String
-  status          String
+  status          RunStatus
   provider        String?
   model           String?
   output          String?
@@ -52,10 +52,19 @@ model Run {
   task      Task          @relation(fields: [taskId], references: [id], onDelete: Cascade)
   events    RunEvent[]
   artifacts RunArtifact[]
+  runSecurity RunSecurity[]
 
   @@index([taskId])
   @@index([status])
   @@index([branch])
+}
+
+enum RunStatus {
+  queued
+  running
+  completed
+  failed
+  cancelled
 }
 
 model RunArtifact {
@@ -70,6 +79,20 @@ model RunArtifact {
   run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId, kind])
+}
+
+model RunSecurity {
+  id          String   @id @default(cuid())
+  runId       String   @unique
+  scannerId   String
+  status      String   // passed/failed/unavailable/error
+  severity    String   // high/critical/medium/low
+  description String
+  affectedFile String?
+  lineNumber  Int?
+  scannedAt   DateTime @default(now())
+  error       String?
+  run         Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
 }
 
 model RunEvent {

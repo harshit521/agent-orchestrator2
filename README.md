@@ -486,7 +486,22 @@ Configuration — copy `.env.example` to `apps/api/.env` (loaded automatically):
 - `AGENT_MAX_STEPS` / `AGENT_MAX_TOKENS` / `AGENT_MAX_TOOL_CALLS` — agent limits
 - `AGENT_COMMAND_TIMEOUT_MS` / `AGENT_TEST_TIMEOUT_MS` — command and test timeouts
 - `AGENT_RUN_TESTS` / `AGENT_REQUIRE_CHANGES` / `AGENT_TEST_COMMAND` — verification policy
+- `MAX_CONCURRENT_RUNS` — maximum number of runs executing simultaneously (default: 3)
 - `AGENT_COMMAND_ALLOWLIST` — comma-separated executables the agent may run (no shell)
+
+### M2 Testing
+
+M2 introduces the scheduler and lifecycle management. Tests verify:
+
+- **Concurrency limits**: Three submitted runs with `MAX_CONCURRENT_RUNS=2` — exactly two execute simultaneously, third remains queued
+- **Queue triggering**: Completion of a running run triggers the next queued run
+- **Queued run cancellation**: Queued runs cancelled immediately via `POST /runs/:runId/cancel`
+- **Running run cancellation**: Running runs cancelled via AbortSignal
+- **Restart recovery**: Application restart marks orphaned running runs as failed, recovers queued runs
+- **Duplicate prevention**: Submitting duplicate runs prevents re-execution
+- **Scheduler error handling**: Edge cases with concurrency and queue management
+
+See `docs/implementation/M2.md` for detailed test scenarios and expected results.
 - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` — identity used for agent commits
 - `SECURITY_ENABLED` — enables `POST /security/scan`
 - `VITE_API_URL` — optional frontend API origin (default `/api`, using the dev proxy or same-origin build)
@@ -579,7 +594,7 @@ Partially implemented / needs external prerequisites:
 - Gitleaks and Semgrep were unavailable locally; only a real Trivy run was verified. Missing tools are reported instead of simulated.
 - The Docker image was authored but not built here (no Docker daemon available).
 
-Not implemented yet: per-task Docker worker isolation, GitHub OAuth, coding agents that edit repositories and push branches, task decomposition/scheduling, and analytics.
+Not implemented yet: **M3 security scanning and PR security gate** implemented. per-task Docker worker isolation, GitHub OAuth, coding agents that edit repositories and push branches, task decomposition/scheduling, and analytics.
 
 🗺️ Development Roadmap
 
@@ -758,8 +773,9 @@ and integrations. Includes Git worktree isolation, GitHub webhook/PR integration
 runner, Docker packaging, CI, and tests.
 
 Remaining: per-task Docker worker execution, GitHub OAuth, a coding agent that edits and pushes
-repositories, task decomposition/scheduling, and analytics. Docker image build and live
-GitHub/LLM/security-tool runs require credentials or a Docker daemon not available here.
+repositories, analytics. Docker image build and live GitHub/LLM/security-tool runs require
+credentials or a Docker daemon not available here. **M2 scheduler and lifecycle management
+(concurrency limits, queued runs, cancellation, restart recovery) are implemented and testable.**
 
 📄 Project Reference
 

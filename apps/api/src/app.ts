@@ -10,17 +10,20 @@ import Fastify, {
 
 import { createAgentRegistry } from "./agents/index.js";
 import type { AgentRegistry } from "./agents/registry.js";
-import { loadConfig, type AppConfig } from "./config.js";
 import { createPrismaClient } from "./db/client.js";
 import { GitHubClient } from "./github/client.js";
 import { registerGithubRoutes } from "./http/github-routes.js";
 import { registerRoutes } from "./http/routes.js";
 import { registerSecurityRoutes } from "./http/security-routes.js";
 import { RunEventBus } from "./runs/event-bus.js";
-import { RunService, type GitHubIntegration } from "./runs/run-service.js";
+import { RunService, type RunServiceDeps } from "./runs/run-service.js";
 import { RunStore } from "./runs/run-store.js";
+import { SchedulerService } from "./scheduler/SchedulerService.js";
 import { SecurityScanner } from "./security/scanner.js";
 import { WorktreeService } from "./worktrees/worktree-service.js";
+import { z } from "zod";
+import type { AppConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 
 const WEB_DIST = fileURLToPath(new URL("../../web/dist", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -40,14 +43,10 @@ export interface BuildAppOptions {
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const config = options.config ?? loadConfig();
-  const prisma = createPrismaClient(config.databaseUrl);
-  const store = new RunStore(prisma);
-  const events = new RunEventBus();
-  const agents =
-    options.agents ?? createAgentRegistry(config.llm, config.agent);
 
+  // Create the Fastify app first
   const app = Fastify({
-    logger: options.logger ?? true,
+    logger: true,
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -77,6 +76,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       error: message,
     });
   });
+
+  const prisma = createPrismaClient(config.databaseUrl);
+  const store = new RunStore(prisma);
+  const events = new RunEventBus();
+  const agents =
+    options.agents ?? createAgentRegistry(config.llm, config.agent);
 
   const worktreesRoot = config.worktrees.root
     ? path.resolve(REPO_ROOT, config.worktrees.root)
@@ -122,7 +127,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             }
           : null;
 
-  // Rebuild the service now that the worktree and GitHub dependencies exist.
+  // Create the scheduler for managing run execution lifecycle
+  const scheduler = new SchedulerService({
+    store,
+    events,
+    config,
+  });
+
+  // Create the RunService with scheduler integration
   const lifecycle = new RunService({
     store,
     agents,
@@ -134,7 +146,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       service: worktreeService,
     },
     github,
+    scheduler,
   });
+
+  // Set up completion callbacks from RunService to scheduler
+  lifecycle.registerCompletionCallback = (
+    runId: string,
+    callback: () => Promise<void>
+  ) => {
+    scheduler.registerCompletionCallback(runId, callback);
+  };
 
   const apiDeps = {
     agents,
@@ -260,7 +281,77 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     await prisma.$disconnect();
+    // Shut down the scheduler on app close
+    await scheduler.shutdown();
   });
 
+  // Handle restart recovery on startup
+  // Run after the app is listening
+  const startRecovery = async () => {
+    try {
+      // Re-identify orphaned runs and handle them appropriately
+      await recoveryOnStartup(store, scheduler);
+    } catch (error: unknown) {
+      app.log.error({ err: error }, "Error during restart recovery");
+    }
+  };
+
+  // Run recovery after a brief delay to let the app stabilize
+  setTimeout(startRecovery, 1000);
+
   return app;
+}
+
+/**
+ * Recovery on startup: identify orphaned runs and handle them appropriately.
+ * - Running runs: mark as failed (they were interrupted)
+ * - Queued runs: keep them queued for the scheduler to pick up
+ * - Completed/failed/cancelled runs: leave as-is
+ */
+async function recoveryOnStartup(
+  store: RunStore,
+  scheduler: SchedulerService
+): Promise<void> {
+  // Find all runs that are in "running" state
+  const runningRuns = await store.listRuns({ status: "running" });
+
+  if (runningRuns.length === 0) {
+    return;
+  }
+
+  // Mark all orphaned running runs as failed
+  // These runs were interrupted by the restart, so we mark them as failed
+  for (const run of runningRuns) {
+    try {
+      await store.completeRun(run.id, {
+        status: "failed" as const,
+        provider: null,
+        model: null,
+        completedAt: new Date(),
+        durationMs: 0,
+        inputTokens: null,
+        outputTokens: null,
+        output: null,
+        error: {
+          code: "INTERRUPTED_BY_RESTART",
+          message: "Run was interrupted by application restart",
+        },
+      });
+
+      // Publish failed event
+      scheduler.publish({
+        runId: run.id,
+        taskId: run.taskId,
+        type: "run.failed" as any,
+        message: `Run ${run.id} failed (interrupted by restart)`,
+        percent: 100,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error: unknown) {
+      // Skip on error
+    }
+  }
+
+  // Process the queue to start any pending runs
+  await scheduler.processQueue();
 }

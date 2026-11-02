@@ -25,6 +25,14 @@ export const taskStatusSchema = z.enum([
   "ready_to_merge",
 ]);
 
+export const runStatusSchema = z.enum([
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
 export const createTaskSchema = z.object({
   prompt: promptSchema,
   title: z.string().trim().min(1).max(200).optional(),

@@ -32,10 +32,31 @@ export interface NewRunEvent {
   data?: unknown;
 }
 
-export interface RunWorkspace {
-  branch: string;
-  worktreePath: string;
-  baseBranch: string;
+export interface Run {
+  id: string;
+  taskId: string;
+  status: string;
+  provider?: string | null;
+  model?: string | null;
+  output?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  branch?: string | null;
+  worktreePath?: string | null;
+  commitSha?: string | null;
+  pullRequestUrl?: string | null;
+  baseBranch?: string | null;
+  startedAt: string;
+  completedAt?: string | null;
+  durationMs?: number | null;
+}
+
+export interface RunStatusInfo {
+  runId: string;
+  status: string;
+  queuedAt?: string;
 }
 
 export interface RunGitMetadata {
@@ -376,6 +397,30 @@ export class RunStore {
               errorMessage: result.error.message,
             }
           : {}),
+      },
+    });
+  }
+
+  async updateRunStatus(runId: string, status: string) {
+    return this.#prisma.run.update({
+      where: { id: runId },
+      data: { status },
+    });
+  }
+
+  async findRunById(runId: string): Promise<Run | null> {
+    return this.#prisma.run.findUnique({
+      where: { id: runId },
+      include: {
+        task: {
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            priority: true,
+            agentId: true,
+          },
+        },
       },
     });
   }
