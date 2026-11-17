@@ -12,49 +12,6 @@ Project: Semester Group Project · B.Tech CS · KIET Group of Institutions
 
 ## What is actually implemented
 
-### M1 — Real coding agent and worktree isolation
-
-- A real tool-calling `CodingAgent` that reads and edits files through path-jailed tools
-  (`read_file`, `list_directory`, `search_repo`, `write_file`, `apply_patch`).
-- Per-run Git branch and worktree on `taskfleet/<runId>`.
-- Allowlisted command execution with no shell, plus automatic repository tests.
-- Real diff, commit, optional push, and optional GitHub pull request.
-- OpenAI-compatible, Anthropic, and deterministic offline `stub` providers.
-- Persisted `RunEvent`s and `RunArtifact`s (diff, changed files, test results, commit, PR).
-- SSE streaming with replay, dedupe, heartbeats, and close on terminal events.
-
-See [`docs/implementation/M1.md`](docs/implementation/M1.md).
-
-### M2 — Scheduler and run lifecycle
-
-- A database-authoritative scheduler. Queued runs are claimed atomically with a conditional
-  `updateMany`, ordered by priority (`urgent` → `high` → `medium` → `low`) and then FIFO.
-- `MAX_CONCURRENT_RUNS` limits how many runs execute at once; additional runs stay `queued`.
-- `POST /runs/:runId/cancel`:
-  - queued run → immediately `cancelled`;
-  - running run → abort signal and child processes, persist the reason, emit `run.cancelled`,
-    and stop before commit/push.
-- Startup recovery marks orphaned `running` runs as `failed` with
-  `INTERRUPTED_BY_RESTART`; queued runs drain normally.
-- Queue positions are exposed in the API and UI.
-- Run states are `queued`, `running`, `completed`, `failed`, and `cancelled`.
-
-See [`docs/implementation/M2.md`](docs/implementation/M2.md).
-
-### M3 — Security gate, events, and lifecycle UI
-
-- A security gate runs against the coding worktree after tests and before commit.
-- `SECURITY_POLICY=fail-closed` blocks a run on `failed`/`error` scanner results;
-  `warn-only` persists findings and continues. Scanners that are not installed are reported
-  as `unavailable` and do not block.
-- Scanner results are persisted per run (`RunSecurity`) and exposed as `security[]` on the run
-  detail endpoint, along with a `security_scan` artifact containing the full summary.
-- Events: `security.started`, `security.completed`, `security.failed`.
-- The dashboard consumes real SSE events and shows queue position, concurrency, cancellation,
-  all five run states, and persisted security findings.
-
-See [`docs/implementation/M3.md`](docs/implementation/M3.md).
-
 ### Dashboard
 
 The React console has nine pages:
