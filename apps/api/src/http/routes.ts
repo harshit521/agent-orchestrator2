@@ -11,7 +11,7 @@ import type {
 } from "../runs/run-store.js";
 import type { WorktreeService } from "../worktrees/worktree-service.js";
 import type { SchedulerService } from "../scheduler/SchedulerService.js";
-import { eventToDto, artifactToDto, parseJsonValue, runToDto } from "../runs/run-dto.js";
+import { eventToDto, artifactToDto, parseJsonValue, runToDto, securityToDto } from "../runs/run-dto.js";
 import {
   RunService,
   type StartTaskRequest,
@@ -47,6 +47,7 @@ export interface IntegrationStatus {
   };
   security: {
     enabled: boolean;
+    policy: string;
   };
 }
 
@@ -467,15 +468,18 @@ export function registerRoutes(
           .send({ success: false, error: "Run not found." });
       }
 
+      const { runSecurity, events, artifacts, ...runBase } = run;
+
       return {
         success: true,
         run: {
-          ...runToDto(run),
+          ...runToDto(runBase),
           ...(run.status === "queued"
             ? { queuePosition: await deps.scheduler.queuePosition(run.id) }
             : {}),
-          events: run.events.map(eventToDto),
-          artifacts: run.artifacts.map(artifactToDto),
+          events: events.map(eventToDto),
+          artifacts: artifacts.map(artifactToDto),
+          security: runSecurity.map(securityToDto),
         },
       };
     }

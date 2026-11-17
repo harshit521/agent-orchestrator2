@@ -55,6 +55,22 @@ export const DEFAULT_SCANNERS: ScannerDefinition[] = [
 ];
 
 /**
+ * Selects the scanners enabled by `SECURITY_SCANNERS`. An empty or omitted
+ * selection means every default scanner.
+ */
+export function resolveScannerDefinitions(
+  ids?: readonly string[]
+): ScannerDefinition[] {
+  if (!ids || ids.length === 0) {
+    return DEFAULT_SCANNERS;
+  }
+
+  const wanted = new Set(ids.map((id) => id.trim()).filter(Boolean));
+
+  return DEFAULT_SCANNERS.filter((definition) => wanted.has(definition.id));
+}
+
+/**
  * Runs the configured security tools against a directory. Missing tools are
  * reported as `unavailable` instead of failing the whole scan, which keeps the
  * gate usable on machines that only have some of them installed.

@@ -23,14 +23,19 @@ import {
 } from "../components/ui/States";
 
 const EVENT_TONES: Record<string, BadgeTone> = {
+  "run.queued": "neutral",
   "run.started": "info",
   "agent.started": "accent",
   "agent.progress": "neutral",
   "run.progress": "neutral",
+  "security.started": "info",
+  "security.completed": "success",
+  "security.failed": "danger",
   "agent.completed": "success",
   "agent.failed": "danger",
   "run.completed": "success",
   "run.failed": "danger",
+  "run.cancelled": "warning",
 };
 
 const DOT_COLORS: Record<BadgeTone, string> = {
@@ -180,8 +185,20 @@ export function OverviewPage() {
           {
             label: "Active runs",
             value: data.runs.active,
-            hint: data.runs.active > 0 ? "executing now" : "no live work",
+            hint: data.scheduler
+              ? `${data.scheduler.activeRuns}/${data.scheduler.maxConcurrentRuns} slots`
+              : data.runs.active > 0
+                ? "executing now"
+                : "no live work",
             tone: data.runs.active > 0 ? "accent" : "default",
+          },
+          {
+            label: "Queued",
+            value: data.runs.queued,
+            hint:
+              data.scheduler && data.scheduler.queuedRuns !== data.runs.queued
+                ? `${data.scheduler.queuedRuns} in scheduler`
+                : "waiting for a slot",
           },
           { label: "Completed", value: data.runs.completed, hint: "runs finished" },
           {
@@ -189,6 +206,11 @@ export function OverviewPage() {
             value: data.runs.failed,
             hint: data.runs.failed > 0 ? "needs review" : "none",
             tone: data.runs.failed > 0 ? "danger" : "default",
+          },
+          {
+            label: "Cancelled",
+            value: data.runs.cancelled,
+            hint: data.runs.cancelled > 0 ? "stopped early" : "none",
           },
           { label: "Agents", value: data.agents.total, hint: "registered" },
           {

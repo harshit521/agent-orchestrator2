@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import { api } from "../api";
 import { useQuery } from "../hooks/useQuery";
+import { messageOf } from "../lib/errors";
 import {
   formatDuration,
   formatRelative,
@@ -10,7 +11,7 @@ import {
 } from "../lib/format";
 import { hrefFor } from "../lib/router";
 import type { RunStatus } from "../types";
-import { ProviderBadge, StatusBadge } from "../components/ui/Badge";
+import { Badge, ProviderBadge, StatusBadge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
 import { PageHeader, Segmented } from "../components/ui/PageHeader";
@@ -22,14 +23,17 @@ import {
   TableSkeleton,
 } from "../components/ui/States";
 import { Input } from "../components/ui/Field";
+import { useToast } from "../components/ui/Toast";
 
 type StatusFilter = "all" | RunStatus;
 
 const OPTIONS: Array<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All" },
+  { value: "queued", label: "Queued" },
   { value: "running", label: "Running" },
   { value: "completed", label: "Completed" },
   { value: "failed", label: "Failed" },
+  { value: "cancelled", label: "Cancelled" },
 ];
 
 export function RunsPage() {
@@ -37,19 +41,24 @@ export function RunsPage() {
     refreshInterval: 4_000,
   });
   const agents = useQuery("agents", api.agents.list);
+  const stats = useQuery("stats", api.stats, { refreshInterval: 4_000 });
+  const { toast } = useToast();
 
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [agentFilter, setAgentFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   const allRuns = runs.data?.runs ?? [];
 
   const counts = useMemo(() => {
     const result: Record<StatusFilter, number> = {
       all: allRuns.length,
+      queued: 0,
       running: 0,
       completed: 0,
       failed: 0,
+      cancelled: 0,
     };
 
     for (const run of allRuns) {
@@ -85,6 +94,28 @@ export function RunsPage() {
     });
   }, [allRuns, filter, agentFilter, search]);
 
+  async function cancelRun(runId: string) {
+    setCancellingId(runId);
+
+    try {
+      await api.runs.cancel(runId);
+      toast({
+        title: "Cancellation requested",
+        description: "The run will stop at the next safe point.",
+        variant: "info",
+      });
+      await runs.refetch();
+    } catch (cause: unknown) {
+      toast({
+        title: "Could not cancel the run",
+        description: messageOf(cause),
+        variant: "error",
+      });
+    } finally {
+      setCancellingId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -102,6 +133,34 @@ export function RunsPage() {
           </Button>
         }
       />
+
+      {stats.data ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2">
+          <Badge tone="info" dot>
+            {stats.data.scheduler.activeRuns} /{" "}
+            {stats.data.scheduler.maxConcurrentRuns} slots active
+          </Badge>
+          <Badge tone="neutral" dot>
+            {stats.data.scheduler.queuedRuns} queued
+          </Badge>
+          <Badge tone="success" dot>
+            {stats.data.runs.completed} completed
+          </Badge>
+          <Badge
+            tone={stats.data.runs.failed > 0 ? "danger" : "neutral"}
+            dot
+          >
+            {stats.data.runs.failed} failed
+          </Badge>
+          <Badge tone="warning" dot>
+            {stats.data.runs.cancelled} cancelled
+          </Badge>
+          <span className="ml-auto text-[11px] text-muted">
+            Concurrency is enforced by the backend scheduler (
+            {stats.data.scheduler.maxConcurrentRuns} max).
+          </span>
+        </div>
+      ) : null}
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-1 flex-col gap-3 sm:flex-row">
@@ -195,7 +254,7 @@ export function RunsPage() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[940px] text-left">
+            <table className="w-full min-w-[1040px] text-left">
               <thead>
                 <tr className="border-b border-line text-[10px] tracking-[0.08em] text-muted uppercase">
                   <th className="px-4 py-2.5 font-medium">Run</th>
@@ -207,6 +266,9 @@ export function RunsPage() {
                   <th className="px-3 py-2.5 font-medium">Started</th>
                   <th className="px-3 py-2.5 text-right font-medium">
                     Duration
+                  </th>
+                  <th className="px-4 py-2.5 text-right font-medium">
+                    Actions
                   </th>
                 </tr>
               </thead>
@@ -256,7 +318,15 @@ export function RunsPage() {
                         />
                       </td>
                       <td className="px-3 py-2.5">
-                        <StatusBadge status={run.status} />
+                        <span className="inline-flex items-center gap-1.5">
+                          <StatusBadge status={run.status} />
+                          {run.status === "queued" &&
+                          typeof run.queuePosition === "number" ? (
+                            <Badge tone="neutral" title="Queue position">
+                              #{run.queuePosition}
+                            </Badge>
+                          ) : null}
+                        </span>
                       </td>
                       <td className="px-3 py-2.5 text-right font-mono text-[11px] whitespace-nowrap text-muted tabular-nums">
                         {tokens ?? "—"}
@@ -266,6 +336,34 @@ export function RunsPage() {
                       </td>
                       <td className="px-3 py-2.5 text-right font-mono text-[11px] text-muted tabular-nums">
                         {formatDuration(run.durationMs)}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center justify-end gap-0.5">
+                          {run.status === "queued" ||
+                          run.status === "running" ? (
+                            <button
+                              type="button"
+                              onClick={() => void cancelRun(run.id)}
+                              disabled={cancellingId === run.id}
+                              title="Cancel run"
+                              aria-label={`Cancel run ${run.id}`}
+                              className="rounded p-1.5 text-muted transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <Icon name="close" className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null}
+                          <a
+                            href={hrefFor(`/runs/${run.id}`)}
+                            title="Open run"
+                            aria-label={`Open run ${run.id}`}
+                            className="rounded p-1.5 text-muted transition-colors hover:bg-subtle hover:text-fg"
+                          >
+                            <Icon
+                              name="arrowUpRight"
+                              className="h-3.5 w-3.5"
+                            />
+                          </a>
+                        </div>
                       </td>
                     </tr>
                   );

@@ -50,6 +50,16 @@ export interface RunArtifactInput {
   data?: unknown;
 }
 
+export interface RunSecurityInput {
+  scannerId: string;
+  status: string;
+  severity: string;
+  description: string;
+  affectedFile?: string | null;
+  lineNumber?: number | null;
+  error?: string | null;
+}
+
 export interface AgentRunStats {
   agentId: string;
   totalRuns: number;
@@ -239,6 +249,7 @@ export class RunStore {
         },
         events: { orderBy: { createdAt: "asc" } },
         artifacts: { orderBy: { createdAt: "asc" } },
+        runSecurity: { orderBy: { scannedAt: "asc" } },
       },
     });
   }
@@ -364,6 +375,29 @@ export class RunStore {
     return this.#prisma.runArtifact.findMany({
       where: { runId },
       orderBy: { createdAt: "asc" },
+    });
+  }
+
+  /** Persists one scanner result for a run's security gate. */
+  async addSecurityResult(runId: string, result: RunSecurityInput) {
+    return this.#prisma.runSecurity.create({
+      data: {
+        runId,
+        scannerId: result.scannerId,
+        status: result.status,
+        severity: result.severity,
+        description: result.description,
+        affectedFile: result.affectedFile ?? null,
+        lineNumber: result.lineNumber ?? null,
+        error: result.error ?? null,
+      },
+    });
+  }
+
+  async listSecurityResults(runId: string) {
+    return this.#prisma.runSecurity.findMany({
+      where: { runId },
+      orderBy: { scannedAt: "asc" },
     });
   }
 

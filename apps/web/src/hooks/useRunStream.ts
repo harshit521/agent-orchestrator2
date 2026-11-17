@@ -12,14 +12,34 @@ export type StreamState =
   | "error";
 
 const EVENT_TYPES: RunEventType[] = [
+  "run.queued",
   "run.started",
+  "workspace.created",
+  "workspace.removed",
   "agent.started",
+  "agent.edit",
   "run.progress",
   "agent.progress",
+  "test.started",
+  "test.completed",
+  "security.started",
+  "security.completed",
+  "security.failed",
+  "git.commit",
+  "git.push",
+  "github.pr.opened",
+  "github.pr.skipped",
   "agent.completed",
   "agent.failed",
   "run.completed",
   "run.failed",
+  "run.cancelled",
+];
+
+const TERMINAL_EVENTS: RunEventType[] = [
+  "run.completed",
+  "run.failed",
+  "run.cancelled",
 ];
 
 /**
@@ -60,7 +80,7 @@ export function useRunStream(
 
         onEventRef.current(event);
 
-        if (event.type === "run.completed" || event.type === "run.failed") {
+        if (TERMINAL_EVENTS.includes(event.type)) {
           terminal = true;
           source.close();
           setState("closed");

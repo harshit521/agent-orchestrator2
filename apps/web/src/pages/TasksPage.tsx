@@ -266,7 +266,12 @@ export function TasksPage() {
               </thead>
               <tbody className="divide-y divide-line">
                 {visible.map((task) => {
-                  const active = task.status === "running";
+                  const active =
+                    task.status === "running" ||
+                    task.runs.some(
+                      (run) =>
+                        run.status === "running" || run.status === "queued"
+                    );
                   const busy = runningId === task.id;
 
                   return (
@@ -318,7 +323,7 @@ export function TasksPage() {
                             disabled={busy || active}
                             title={
                               active
-                                ? "A run is already executing this task"
+                                ? "A run is already queued or executing this task"
                                 : "Submit for execution"
                             }
                             aria-label={`Run ${task.title}`}

@@ -32,3 +32,10 @@ export function artifactToDto<T extends { data: string | null }>(
 ): Omit<T, "data"> & { data: unknown } {
   return { ...artifact, data: parseJson(artifact.data) };
 }
+
+/** Serialises persisted scanner results, including their scan timestamp. */
+export function securityToDto<T extends { scannedAt: Date }>(
+  result: T
+): Omit<T, "scannedAt"> & { scannedAt: string } {
+  return { ...result, scannedAt: result.scannedAt.toISOString() };
+}

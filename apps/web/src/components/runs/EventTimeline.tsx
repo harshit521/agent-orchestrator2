@@ -5,6 +5,7 @@ import { JsonBlock } from "../shared/JsonBlock";
 import { Badge, type BadgeTone } from "../ui/Badge";
 
 const TONES: Record<string, BadgeTone> = {
+  "run.queued": "neutral",
   "run.started": "info",
   "workspace.created": "accent",
   "workspace.removed": "neutral",
@@ -14,6 +15,9 @@ const TONES: Record<string, BadgeTone> = {
   "agent.progress": "neutral",
   "test.started": "info",
   "test.completed": "info",
+  "security.started": "info",
+  "security.completed": "success",
+  "security.failed": "danger",
   "git.commit": "success",
   "git.push": "success",
   "github.pr.opened": "success",
@@ -22,6 +26,7 @@ const TONES: Record<string, BadgeTone> = {
   "agent.failed": "danger",
   "run.completed": "success",
   "run.failed": "danger",
+  "run.cancelled": "warning",
 };
 
 const DOTS: Record<BadgeTone, string> = {

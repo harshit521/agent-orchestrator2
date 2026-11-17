@@ -84,6 +84,15 @@ function RunHistoryRow({ run }: { run: Run }) {
         <Icon name="arrowUpRight" className="h-3 w-3 text-muted" />
       </div>
       {run.status === "running" ? <RunProgress run={run} /> : null}
+      {run.status === "queued" ? (
+        <p className="mt-1.5 text-[11px] leading-4 text-muted">
+          Waiting in the scheduler queue
+          {typeof run.queuePosition === "number"
+            ? ` · position ${run.queuePosition}`
+            : ""}
+          .
+        </p>
+      ) : null}
       {run.errorMessage ? (
         <p className="mt-1.5 text-[11px] leading-4 text-danger">
           {run.errorCode ? `${run.errorCode}: ` : ""}
@@ -137,7 +146,10 @@ export function TaskDetailPage({ taskId }: { taskId: string }) {
   }
 
   const agent = agents.data?.agents.find((entry) => entry.id === task.agentId);
-  const activeRun = task.runs.find((run) => run.status === "running");
+  const activeRun = task.runs.find(
+    (run) => run.status === "running" || run.status === "queued"
+  );
+  const activeRunIsQueued = activeRun?.status === "queued";
   const latestRun = task.runs[0];
   const currentTask = task;
 
@@ -213,7 +225,11 @@ export function TaskDetailPage({ taskId }: { taskId: string }) {
               disabled={Boolean(activeRun)}
               leading={<Icon name="play" className="h-3.5 w-3.5" />}
             >
-              {activeRun ? "Running" : "Run task"}
+              {activeRunIsQueued
+                ? "Queued"
+                : activeRun
+                  ? "Running"
+                  : "Run task"}
             </Button>
             <Button
               size="sm"
@@ -252,13 +268,16 @@ export function TaskDetailPage({ taskId }: { taskId: string }) {
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-40" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-info" />
             </span>
-            A run is executing this task.
+            {activeRunIsQueued
+              ? "A run for this task is waiting in the scheduler queue."
+              : "A run is executing this task."}
           </div>
           <a
             href={hrefFor(`/runs/${activeRun.id}`)}
             className="inline-flex items-center gap-1 text-xs font-medium text-info hover:underline"
           >
-            Open live run {shortId(activeRun.id, 8)}
+            {activeRunIsQueued ? "Open queued run" : "Open live run"}{" "}
+            {shortId(activeRun.id, 8)}
             <Icon name="arrowUpRight" className="h-3 w-3" />
           </a>
         </div>

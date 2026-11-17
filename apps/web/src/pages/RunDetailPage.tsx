@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useQuery } from "../hooks/useQuery";
 import { useRunStream, type StreamState } from "../hooks/useRunStream";
 import { cn } from "../lib/cn";
+import { messageOf } from "../lib/errors";
 import {
   formatDateTime,
   formatDuration,
@@ -13,6 +14,7 @@ import {
 import { hrefFor } from "../lib/router";
 import type { RunEvent } from "../types";
 import { EventTimeline, latestEvent, progressOf } from "../components/runs/EventTimeline";
+import { SecurityPanel } from "../components/runs/SecurityPanel";
 import { WorkspacePanel } from "../components/runs/WorkspacePanel";
 import { JsonBlock, TextBlock } from "../components/shared/JsonBlock";
 import { Badge, ProviderBadge, StatusBadge } from "../components/ui/Badge";
@@ -31,6 +33,13 @@ import {
   InlineError,
   Skeleton,
 } from "../components/ui/States";
+import { useToast } from "../components/ui/Toast";
+
+const TERMINAL_TYPES: RunEvent["type"][] = [
+  "run.completed",
+  "run.failed",
+  "run.cancelled",
+];
 
 function mergeEvents(persisted: RunEvent[], live: RunEvent[]): RunEvent[] {
   const byId = new Map<string, RunEvent>();
@@ -159,10 +168,12 @@ export function RunDetailPage({ runId }: { runId: string }) {
     refreshInterval: 4_000,
   });
   const agents = useQuery("agents", api.agents.list);
+  const { toast } = useToast();
 
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [terminal, setTerminal] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     const persisted = runQuery.data?.run.events;
@@ -185,14 +196,45 @@ export function RunDetailPage({ runId }: { runId: string }) {
         : mergeEvents(current, [event])
     );
 
-    if (event.type === "run.completed" || event.type === "run.failed") {
+    if (TERMINAL_TYPES.includes(event.type)) {
       setTerminal(true);
     }
   }, []);
 
   const run = runQuery.data?.run;
-  const streamActive = run?.status === "running" && !terminal;
+  const streamActive =
+    (run?.status === "running" || run?.status === "queued") && !terminal;
   const stream = useRunStream(runId, streamActive, onEvent);
+
+  const cancelRun = useCallback(async () => {
+    if (!run) {
+      return;
+    }
+
+    setCancelling(true);
+
+    try {
+      await api.runs.cancel(run.id);
+      toast({
+        title: "Cancellation requested",
+        description:
+          run.status === "queued"
+            ? "The queued run was cancelled before execution."
+            : "The agent is being stopped; the final event will stream in.",
+        variant: "info",
+      });
+      setTerminal(false);
+      await runQuery.refetch();
+    } catch (cause: unknown) {
+      toast({
+        title: "Could not cancel the run",
+        description: messageOf(cause),
+        variant: "error",
+      });
+    } finally {
+      setCancelling(false);
+    }
+  }, [run, runQuery, toast]);
 
   const progress = progressOf(events);
   const latest = latestEvent(events);
@@ -250,7 +292,9 @@ export function RunDetailPage({ runId }: { runId: string }) {
   const runFinished =
     events.find(
       (event) =>
-        event.type === "run.completed" || event.type === "run.failed"
+        event.type === "run.completed" ||
+        event.type === "run.failed" ||
+        event.type === "run.cancelled"
     ) ?? null;
   const progressCount = events.filter(
     (event) => event.type === "agent.progress" || event.type === "run.progress"
@@ -291,6 +335,12 @@ export function RunDetailPage({ runId }: { runId: string }) {
     },
     { label: "Duration", value: formatDuration(run.durationMs) },
     { label: "Events", value: `${events.length}` },
+    {
+      label: "Queue position",
+      value:
+        typeof run.queuePosition === "number" ? `${run.queuePosition}` : "—",
+      mono: true,
+    },
     {
       label: "Input tokens",
       value: run.inputTokens === null ? "—" : run.inputTokens.toLocaleString(),
@@ -339,6 +389,17 @@ export function RunDetailPage({ runId }: { runId: string }) {
         back={{ label: "Runs", path: "/runs" }}
         actions={
           <>
+            {run.status === "queued" || run.status === "running" ? (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => void cancelRun()}
+                loading={cancelling}
+                leading={<Icon name="close" className="h-3.5 w-3.5" />}
+              >
+                Cancel run
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="secondary"
@@ -366,6 +427,28 @@ export function RunDetailPage({ runId }: { runId: string }) {
           message={`${runQuery.error} Showing the last loaded run.`}
           onRetry={runQuery.refetch}
         />
+      ) : null}
+
+      {run.status === "queued" ? (
+        <div className="rounded-lg border border-line bg-surface px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+            <span className="flex items-center gap-2 text-fg">
+              <Badge tone="neutral" dot>
+                Queued
+              </Badge>
+              <span>
+                Waiting for an execution slot
+                {typeof run.queuePosition === "number"
+                  ? ` · position ${run.queuePosition}`
+                  : ""}
+              </span>
+            </span>
+            <span className="text-[11px] text-muted">
+              The scheduler starts queued runs by priority, then arrival order.
+              This page updates automatically.
+            </span>
+          </div>
+        </div>
       ) : null}
 
       {streamActive ? (
@@ -404,13 +487,21 @@ export function RunDetailPage({ runId }: { runId: string }) {
         <div className="space-y-5">
           <Panel>
             <PanelHeader
-              title={run.status === "failed" ? "Failure details" : "Result"}
+              title={
+                run.status === "failed"
+                  ? "Failure details"
+                  : run.status === "cancelled"
+                    ? "Cancellation"
+                    : "Result"
+              }
               description={
-                run.status === "running"
-                  ? "The agent is still executing"
-                  : run.completedAt
-                    ? `Finished ${formatDateTime(run.completedAt)}`
-                    : undefined
+                run.status === "queued"
+                  ? "The scheduler has not started this run yet"
+                  : run.status === "running"
+                    ? "The agent is still executing"
+                    : run.completedAt
+                      ? `Finished ${formatDateTime(run.completedAt)}`
+                      : undefined
               }
               action={<StatusBadge status={run.status} />}
             />
@@ -430,6 +521,24 @@ export function RunDetailPage({ runId }: { runId: string }) {
                   </div>
                 ) : null}
               </PanelBody>
+            ) : run.status === "cancelled" ? (
+              <PanelBody>
+                <div className="rounded-md border border-warn/30 bg-warn-soft px-3 py-2.5">
+                  <p className="font-mono text-[11px] font-medium text-warn">
+                    CANCELLED
+                  </p>
+                  <p className="mt-1 text-xs leading-5 break-words text-warn/90">
+                    {run.cancelReason ??
+                      run.errorMessage ??
+                      "This run was cancelled before it finished."}
+                  </p>
+                </div>
+                {run.cancelledAt ? (
+                  <p className="mt-2 text-[11px] text-muted">
+                    Cancelled {formatDateTime(run.cancelledAt)}
+                  </p>
+                ) : null}
+              </PanelBody>
             ) : run.output !== null && run.output !== undefined ? (
               <div className="space-y-3 p-4">
                 {summary ? (
@@ -442,18 +551,26 @@ export function RunDetailPage({ runId }: { runId: string }) {
             ) : (
               <div className="px-4 py-8 text-center">
                 <p className="text-[13px] font-medium text-fg">
-                  {run.status === "running" ? "Execution in progress" : "No output"}
+                  {run.status === "running"
+                    ? "Execution in progress"
+                    : run.status === "queued"
+                      ? "Waiting in the queue"
+                      : "No output"}
                 </p>
                 <p className="mx-auto mt-1 max-w-md text-xs leading-5 text-muted">
                   {run.status === "running"
                     ? "Events stream in over SSE as the agent works. The final result will appear here when the run completes."
-                    : "The backend completed this run without returning an output payload."}
+                    : run.status === "queued"
+                      ? "The scheduler will start this run when an execution slot is free. Queue position and live events update automatically."
+                      : "The backend completed this run without returning an output payload."}
                 </p>
               </div>
             )}
           </Panel>
 
           <WorkspacePanel run={run} />
+
+          <SecurityPanel run={run} security={run.security ?? []} />
 
           <Panel>
             <PanelHeader
@@ -561,11 +678,14 @@ export function RunDetailPage({ runId }: { runId: string }) {
                   label={
                     runFinished?.type === "run.failed"
                       ? "Run failed"
-                      : "Run completed"
+                      : runFinished?.type === "run.cancelled"
+                        ? "Run cancelled"
+                        : "Run completed"
                   }
                   time={runFinished?.createdAt ?? run.completedAt}
                   tone={
-                    runFinished?.type === "run.failed"
+                    runFinished?.type === "run.failed" ||
+                    runFinished?.type === "run.cancelled"
                       ? "failed"
                       : runFinished
                         ? "done"

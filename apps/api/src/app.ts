@@ -20,6 +20,10 @@ import { RunEventBus } from "./runs/event-bus.js";
 import { RunService, type GitHubIntegration } from "./runs/run-service.js";
 import { RunStore } from "./runs/run-store.js";
 import { SchedulerService } from "./scheduler/SchedulerService.js";
+import {
+  createSecurityGate,
+  type SecurityGate,
+} from "./security/gate.js";
 import { SecurityScanner } from "./security/scanner.js";
 import { WorktreeService } from "./worktrees/worktree-service.js";
 
@@ -37,6 +41,8 @@ export interface BuildAppOptions {
   worktreeService?: WorktreeService;
   /** Override GitHub wiring: null disables it, undefined uses configuration. */
   githubClient?: GitHubClient | null;
+  /** Override the run security gate: null disables it, undefined uses config. */
+  securityGate?: SecurityGate | null;
 }
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
@@ -124,6 +130,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           : null;
 
   // Rebuild the service now that the worktree and GitHub dependencies exist.
+  const securityGate: SecurityGate | null =
+    options.securityGate === undefined
+      ? config.security.enabled
+        ? createSecurityGate({
+            policy: config.security.policy,
+            ...(config.security.scanners
+              ? { scanners: config.security.scanners }
+              : {}),
+            timeoutMs: config.security.scanTimeoutMs,
+          })
+        : null
+      : options.securityGate;
+
   const lifecycle = new RunService({
     store,
     agents,
@@ -135,6 +154,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       service: worktreeService,
     },
     github,
+    security: securityGate,
   });
 
   const scheduler = new SchedulerService({
@@ -186,7 +206,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         root: worktreesRoot,
       },
       security: {
-        enabled: config.security.enabled,
+        enabled: Boolean(securityGate),
+        policy: config.security.policy,
       },
     },
   };

@@ -85,16 +85,18 @@ model RunArtifact {
 
 model RunSecurity {
   id          String   @id @default(cuid())
-  runId       String   @unique
+  runId       String
   scannerId   String
   status      String   // passed/failed/unavailable/error
-  severity    String   // high/critical/medium/low
+  severity    String   // high/critical/medium/low/none
   description String
   affectedFile String?
   lineNumber  Int?
   scannedAt   DateTime @default(now())
   error       String?
   run         Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, scannedAt])
 }
 
 model RunEvent {

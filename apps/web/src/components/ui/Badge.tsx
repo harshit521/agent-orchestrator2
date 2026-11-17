@@ -65,6 +65,7 @@ const STATUS_META: Record<
 > = {
   queued: { label: "Queued", tone: "neutral" },
   running: { label: "Running", tone: "info" },
+  cancelled: { label: "Cancelled", tone: "warning" },
   in_review: { label: "In review", tone: "warning" },
   completed: { label: "Completed", tone: "success" },
   failed: { label: "Failed", tone: "danger" },

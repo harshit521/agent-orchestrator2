@@ -8,9 +8,15 @@ export type TaskStatus =
   | "failed"
   | "ready_to_merge";
 
-export type RunStatus = "running" | "completed" | "failed";
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export type RunEventType =
+  | "run.queued"
   | "run.started"
   | "workspace.created"
   | "workspace.removed"
@@ -20,6 +26,9 @@ export type RunEventType =
   | "agent.progress"
   | "test.started"
   | "test.completed"
+  | "security.started"
+  | "security.completed"
+  | "security.failed"
   | "git.commit"
   | "git.push"
   | "github.pr.opened"
@@ -27,7 +36,8 @@ export type RunEventType =
   | "agent.completed"
   | "agent.failed"
   | "run.completed"
-  | "run.failed";
+  | "run.failed"
+  | "run.cancelled";
 
 export interface AgentRunStats {
   agentId: string;
@@ -88,6 +98,19 @@ export interface ChangedFile {
   previousPath?: string;
 }
 
+export interface RunSecurityResult {
+  id: string;
+  runId: string;
+  scannerId: string;
+  status: "passed" | "failed" | "unavailable" | "error" | string;
+  severity: string;
+  description: string;
+  affectedFile: string | null;
+  lineNumber: number | null;
+  scannedAt: string;
+  error: string | null;
+}
+
 export interface Run {
   id: string;
   taskId: string;
@@ -105,12 +128,16 @@ export interface Run {
   commitSha: string | null;
   pullRequestUrl: string | null;
   baseBranch: string | null;
+  cancelReason?: string | null;
   startedAt: string;
   completedAt: string | null;
+  cancelledAt?: string | null;
   durationMs: number | null;
+  queuePosition?: number | null;
   task?: RunTaskRef;
   events?: RunEvent[];
   artifacts?: RunArtifact[];
+  security?: RunSecurityResult[];
 }
 
 export interface Task {
@@ -137,9 +164,17 @@ export interface TaskCounts {
 
 export interface RunCounts {
   total: number;
+  queued: number;
   active: number;
   completed: number;
   failed: number;
+  cancelled: number;
+}
+
+export interface SchedulerState {
+  activeRuns: number;
+  queuedRuns: number;
+  maxConcurrentRuns: number;
 }
 
 export interface ActivityItem {
@@ -160,6 +195,7 @@ export interface StatsResponse {
   success: boolean;
   tasks: TaskCounts;
   runs: RunCounts;
+  scheduler: SchedulerState;
   agents: { total: number };
   activeRuns: Run[];
   recentActivity: ActivityItem[];
@@ -234,6 +270,7 @@ export interface IntegrationsResponse {
   };
   security: {
     enabled: boolean;
+    policy?: string;
   };
 }
 

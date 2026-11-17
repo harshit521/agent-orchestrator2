@@ -4,6 +4,11 @@ import type { AgentResult } from "../agents/base/agent-result.js";
 import type { AgentRegistry } from "../agents/registry.js";
 import type { AppConfig } from "../config.js";
 import type { GitHubClient } from "../github/client.js";
+import type {
+  SecurityGate,
+  SecurityPolicy,
+} from "../security/gate.js";
+import type { ScannerResult } from "../security/scanner.js";
 import type { RunEventBus, RunEventType } from "./event-bus.js";
 import type {
   NewRunEvent,
@@ -53,6 +58,16 @@ export interface RunServiceDeps {
     service: WorktreeService | null;
   };
   github: GitHubIntegration | null;
+  /** Present only when the security gate is enabled. */
+  security: SecurityGate | null;
+}
+
+export interface SecurityScanSummary {
+  status: "passed" | "failed" | "error";
+  policy: SecurityPolicy;
+  blocking: boolean;
+  results: ScannerResult[];
+  error?: string;
 }
 
 /** The subset of the scheduler the lifecycle needs. */
@@ -104,6 +119,7 @@ export class RunService {
   readonly #config: AppConfig;
   readonly #worktrees: RunServiceDeps["worktrees"];
   readonly #github: GitHubIntegration | null;
+  readonly #security: SecurityGate | null;
   readonly #controllers = new Map<string, AbortController>();
   readonly #activeRuns = new Set<string>();
   readonly #cancelRequests = new Set<string>();
@@ -118,6 +134,7 @@ export class RunService {
     this.#config = deps.config;
     this.#worktrees = deps.worktrees;
     this.#github = deps.github;
+    this.#security = deps.security;
   }
 
   /** Creates a task and queues its first run. */
@@ -754,6 +771,30 @@ export class RunService {
       }
     }
 
+    let security: SecurityScanSummary | null = null;
+
+    if (this.#security) {
+      security = await this.#runSecurityGate({
+        taskId,
+        runId,
+        worktree,
+        gate: this.#security,
+      });
+
+      if (security.blocking) {
+        return this.#failure(
+          "SECURITY_FAILED",
+          security.error ?? this.#securityFailureMessage(security),
+          input.startedAt,
+          input.result,
+          {
+            ...(testResult ? { tests: testResult } : {}),
+            security,
+          }
+        );
+      }
+    }
+
     // Re-stage in case the test runner generated files that are not ignored.
     diff = await service.diff(worktree);
 
@@ -940,6 +981,7 @@ export class RunService {
         changedFiles: diff.files,
         diff: { truncated: diff.truncated, bytes: diff.diff.length },
         tests: testResult,
+        security,
         commitSha,
         pullRequestUrl,
         github: {
@@ -948,6 +990,138 @@ export class RunService {
         },
       },
     };
+  }
+
+  /**
+   * Runs the security gate against the worktree. Findings are persisted even
+   * under the warn-only policy; only `fail-closed` blocks the commit.
+   */
+  async #runSecurityGate(input: {
+    taskId: string;
+    runId: string;
+    worktree: Worktree;
+    gate: SecurityGate;
+  }): Promise<SecurityScanSummary> {
+    const { taskId, runId, worktree, gate } = input;
+
+    await this.#record(runId, taskId, {
+      type: "security.started",
+      stage: "security.started",
+      message:
+        "Running the security gate against the worktree before committing.",
+      percent: 95,
+    });
+
+    let results: ScannerResult[] = [];
+    let error: string | undefined;
+
+    try {
+      results = await gate.scan(worktree.path);
+    } catch (cause: unknown) {
+      error =
+        cause instanceof Error
+          ? cause.message
+          : "The security gate failed to run.";
+    }
+
+    const failed = results.filter(
+      (result) => result.status === "failed" || result.status === "error"
+    );
+    const status: SecurityScanSummary["status"] = error
+      ? "error"
+      : failed.length > 0
+        ? "failed"
+        : "passed";
+    const blocking = status !== "passed" && gate.policy === "fail-closed";
+    const summary: SecurityScanSummary = {
+      status,
+      policy: gate.policy,
+      blocking,
+      results,
+      ...(error ? { error } : {}),
+    };
+
+    for (const result of results) {
+      const finding = result.status === "failed" || result.status === "error";
+
+      await this.#store.addSecurityResult(runId, {
+        scannerId: result.id,
+        status: result.status,
+        severity: finding ? "high" : "none",
+        description:
+          result.status === "unavailable"
+            ? `${result.label} is not installed`
+            : `${result.label} · exit ${result.exitCode ?? "n/a"}`,
+        error: finding ? result.output : null,
+      });
+    }
+
+    if (results.length === 0 && error) {
+      await this.#store.addSecurityResult(runId, {
+        scannerId: "security-gate",
+        status: "error",
+        severity: "high",
+        description: "The security gate failed to run.",
+        error,
+      });
+    }
+
+    await this.#store.addArtifact(runId, {
+      kind: "security_scan",
+      title: "Security scan",
+      data: summary,
+    });
+
+    const message =
+      status === "passed"
+        ? `Security gate passed (${results.length} scanner${
+            results.length === 1 ? "" : "s"
+          }).`
+        : error
+          ? `Security gate could not run: ${error}`
+          : `${failed.length} scanner${
+              failed.length === 1 ? "" : "s"
+            } reported issues${
+              blocking
+                ? "; the fail-closed policy blocked this run"
+                : " (warn-only policy: continuing)"
+            }.`;
+
+    await this.#record(runId, taskId, {
+      type: status === "passed" ? "security.completed" : "security.failed",
+      stage: `security.${status}`,
+      message,
+      percent: 95,
+      data: {
+        status,
+        policy: gate.policy,
+        blocking,
+        results: results.map((result) => ({
+          id: result.id,
+          label: result.label,
+          status: result.status,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+        })),
+        ...(error ? { error } : {}),
+      },
+    });
+
+    return summary;
+  }
+
+  #securityFailureMessage(summary: SecurityScanSummary): string {
+    if (summary.error) {
+      return `The security gate could not run: ${summary.error}`;
+    }
+
+    const failed = summary.results
+      .filter(
+        (result) => result.status === "failed" || result.status === "error"
+      )
+      .map((result) => result.label);
+
+    return `The security gate blocked this run: ${failed.join(", ")}.`;
   }
 
   async #cleanupWorkspace(
