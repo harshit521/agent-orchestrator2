@@ -236,12 +236,19 @@ export function registerRoutes(
     }
 
     try {
-      const { task, run } = await deps.runService.startTask({
-        prompt: parsed.data.prompt,
-        agentId: parsed.data.agentId,
-        priority: parsed.data.priority,
-        title: parsed.data.title ?? undefined,
-      });
+      const startRequest = toStartRequest(parsed.data);
+
+      if (!parsed.data.start) {
+        const { task } = await deps.runService.createQueuedTask(startRequest);
+
+        return reply.status(201).send({
+          success: true,
+          task: { ...task, runs: task.runs.map(runToDto) },
+          run: null,
+        });
+      }
+
+      const { task, run } = await deps.runService.startTask(startRequest);
 
       return reply.status(202).send({
         success: true,
@@ -464,6 +471,13 @@ export function registerRoutes(
         return reply
           .status(404)
           .send({ success: false, error: "Run not found." });
+      }
+
+      if (run.status !== "running") {
+        return reply.status(409).send({
+          success: false,
+          error: "The run has already finished.",
+        });
       }
 
       const cancelled = deps.runService.cancelRun(run.id);

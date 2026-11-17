@@ -91,6 +91,13 @@ const envSchema = z.object({
     .default("agent@taskfleet.local"),
 
   SECURITY_ENABLED: booleanFromEnv,
+  SECURITY_POLICY: z.enum(["fail-closed", "warn-only"]).default("fail-closed"),
+  SECURITY_SCANNERS: optionalString,
+  SECURITY_SCAN_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(120_000),
 });
 
 export interface LLMConfig {
@@ -233,6 +240,15 @@ export function loadConfig(
     },
     security: {
       enabled: data.SECURITY_ENABLED,
+      policy: data.SECURITY_POLICY,
+      ...(data.SECURITY_SCANNERS
+        ? {
+            scanners: data.SECURITY_SCANNERS.split(",")
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0),
+          }
+        : {}),
+      scanTimeoutMs: data.SECURITY_SCAN_TIMEOUT_MS,
     },
   };
 }

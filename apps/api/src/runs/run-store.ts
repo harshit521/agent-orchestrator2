@@ -1,5 +1,5 @@
 import type { AgentResult } from "../agents/base/agent-result.js";
-import type { PrismaClient } from "../generated/prisma/client.js";
+import type { PrismaClient, RunStatus } from "../generated/prisma/client.js";
 import type { RunEventType } from "./event-bus.js";
 
 export interface CreateTaskInput {
@@ -19,7 +19,7 @@ export interface UpdateTaskInput {
 
 export interface ListRunsOptions {
   limit?: number;
-  status?: string;
+  status?: RunStatus;
   agentId?: string;
   taskId?: string;
 }
@@ -32,31 +32,10 @@ export interface NewRunEvent {
   data?: unknown;
 }
 
-export interface Run {
-  id: string;
-  taskId: string;
-  status: string;
-  provider?: string | null;
-  model?: string | null;
-  output?: string | null;
-  errorCode?: string | null;
-  errorMessage?: string | null;
-  inputTokens?: number | null;
-  outputTokens?: number | null;
-  branch?: string | null;
-  worktreePath?: string | null;
-  commitSha?: string | null;
-  pullRequestUrl?: string | null;
-  baseBranch?: string | null;
-  startedAt: string;
-  completedAt?: string | null;
-  durationMs?: number | null;
-}
-
-export interface RunStatusInfo {
-  runId: string;
-  status: string;
-  queuedAt?: string;
+export interface RunWorkspace {
+  branch: string;
+  worktreePath: string;
+  baseBranch: string;
 }
 
 export interface RunGitMetadata {
@@ -401,27 +380,10 @@ export class RunStore {
     });
   }
 
-  async updateRunStatus(runId: string, status: string) {
+  async updateRunStatus(runId: string, status: RunStatus) {
     return this.#prisma.run.update({
       where: { id: runId },
       data: { status },
-    });
-  }
-
-  async findRunById(runId: string): Promise<Run | null> {
-    return this.#prisma.run.findUnique({
-      where: { id: runId },
-      include: {
-        task: {
-          select: {
-            id: true,
-            title: true,
-            status: true,
-            priority: true,
-            agentId: true,
-          },
-        },
-      },
     });
   }
 

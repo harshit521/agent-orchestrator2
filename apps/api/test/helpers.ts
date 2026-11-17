@@ -41,7 +41,11 @@ export function testConfig(
       authorName: "TaskFleet Test",
       authorEmail: "test@taskfleet.dev",
     },
-    security: { enabled: false },
+    security: {
+      enabled: false,
+      policy: "fail-closed",
+      scanTimeoutMs: 120_000,
+    },
   };
 }
 

@@ -60,7 +60,7 @@ export type UpdateTaskBody = z.infer<typeof updateTaskSchema>;
 
 export const listRunsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  status: taskStatusSchema.optional(),
+  status: runStatusSchema.optional(),
   agentId: z.string().trim().min(1).optional(),
   taskId: z.string().trim().min(1).optional(),
 });
