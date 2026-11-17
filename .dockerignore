@@ -4,6 +4,7 @@ node_modules
 .github
 **/dist
 apps/api/data
+apps/api/src/generated
 .taskfleet
 *.db
 *.db-journal

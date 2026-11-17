@@ -37,6 +37,8 @@ export interface BuildAppOptions {
   config?: AppConfig;
   /** Override the agent registry, mainly for tests. */
   agents?: AgentRegistry;
+  /** Override the run store, mainly for tests. */
+  store?: RunStore;
   /** Override the worktree service, mainly for tests. */
   worktreeService?: WorktreeService;
   /** Override GitHub wiring: null disables it, undefined uses configuration. */
@@ -48,7 +50,7 @@ export interface BuildAppOptions {
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const config = options.config ?? loadConfig();
   const prisma = createPrismaClient(config.databaseUrl);
-  const store = new RunStore(prisma);
+  const store = options.store ?? new RunStore(prisma);
   const events = new RunEventBus();
   const agents =
     options.agents ?? createAgentRegistry(config.llm, config.agent);

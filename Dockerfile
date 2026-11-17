@@ -6,6 +6,11 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
 
+# The api workspace's postinstall runs `prisma generate`, which needs the
+# schema and its config to exist before dependencies are installed.
+COPY apps/api/prisma apps/api/prisma
+COPY apps/api/prisma7.config.ts apps/api/prisma7.config.ts
+
 RUN npm ci
 
 # ---- build --------------------------------------------------------------
