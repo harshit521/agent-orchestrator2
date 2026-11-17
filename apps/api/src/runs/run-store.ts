@@ -71,9 +71,11 @@ export interface TaskCounts {
 
 export interface RunCounts {
   total: number;
+  queued: number;
   active: number;
   completed: number;
   failed: number;
+  cancelled: number;
 }
 
 const STATUS_TO_TASK_KEY: Record<string, keyof TaskCounts> = {
@@ -86,9 +88,18 @@ const STATUS_TO_TASK_KEY: Record<string, keyof TaskCounts> = {
 };
 
 const STATUS_TO_RUN_KEY: Record<string, keyof RunCounts> = {
+  queued: "queued",
   running: "active",
   completed: "completed",
   failed: "failed",
+  cancelled: "cancelled",
+};
+
+const PRIORITY_RANK: Record<string, number> = {
+  urgent: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
 };
 
 /**
@@ -124,11 +135,11 @@ export class RunStore {
         prompt: input.prompt,
         agentId: input.agentId,
         priority: input.priority,
-        status: "running",
+        status: "queued",
         runs: {
           create: {
             agentId: input.agentId,
-            status: "running",
+            status: "queued",
           },
         },
       },
@@ -149,11 +160,11 @@ export class RunStore {
     const task = await this.#prisma.task.update({
       where: { id: taskId },
       data: {
-        status: "running",
+        status: "queued",
         runs: {
           create: {
             agentId,
-            status: "running",
+            status: "queued",
           },
         },
       },
@@ -387,6 +398,118 @@ export class RunStore {
     });
   }
 
+  /** Queued runs in priority order, then FIFO by enqueue time. */
+  async listQueuedRuns(limit = 100) {
+    const runs = await this.#prisma.run.findMany({
+      where: { status: "queued" },
+      orderBy: { startedAt: "asc" },
+      take: limit,
+      include: {
+        task: {
+          select: {
+            id: true,
+            title: true,
+            prompt: true,
+            status: true,
+            priority: true,
+            agentId: true,
+          },
+        },
+      },
+    });
+
+    return runs.sort((left, right) => {
+      const priority =
+        (PRIORITY_RANK[left.task.priority] ?? 99) -
+        (PRIORITY_RANK[right.task.priority] ?? 99);
+
+      if (priority !== 0) {
+        return priority;
+      }
+
+      return left.startedAt.getTime() - right.startedAt.getTime();
+    });
+  }
+
+  /**
+   * Atomically claims one queued run. The conditional update guarantees that
+   * two schedulers (or a double drain) cannot execute the same run.
+   */
+  async claimRun(runId: string) {
+    const claimed = await this.#prisma.run.updateMany({
+      where: { id: runId, status: "queued" },
+      data: { status: "running", startedAt: new Date() },
+    });
+
+    if (claimed.count !== 1) {
+      return null;
+    }
+
+    return this.getRun(runId);
+  }
+
+  async claimNextQueuedRun() {
+    const candidates = await this.listQueuedRuns(25);
+
+    for (const candidate of candidates) {
+      const run = await this.claimRun(candidate.id);
+
+      if (run) {
+        return run;
+      }
+    }
+
+    return null;
+  }
+
+  async countRunsByStatus(status: RunStatus) {
+    return this.#prisma.run.count({ where: { status } });
+  }
+
+  async listRunningRuns() {
+    return this.#prisma.run.findMany({
+      where: { status: "running" },
+      include: {
+        task: { select: { id: true, title: true, agentId: true } },
+      },
+    });
+  }
+
+  /** Marks a run as cancelled and persists the reason. */
+  async markRunCancelled(runId: string, reason: string) {
+    const run = await this.#prisma.run.findUnique({ where: { id: runId } });
+    const now = new Date();
+
+    return this.#prisma.run.update({
+      where: { id: runId },
+      data: {
+        status: "cancelled",
+        errorCode: "CANCELLED",
+        errorMessage: reason,
+        cancelReason: reason,
+        cancelledAt: now,
+        completedAt: now,
+        durationMs: run ? now.getTime() - run.startedAt.getTime() : null,
+      },
+    });
+  }
+
+  async markRunFailed(runId: string, code: string, message: string) {
+    const run = await this.#prisma.run.findUnique({ where: { id: runId } });
+    const now = new Date();
+
+    return this.#prisma.run.update({
+      where: { id: runId },
+      data: {
+        status: "failed",
+        errorCode: code,
+        errorMessage: message,
+        completedAt: now,
+        durationMs: run ? now.getTime() - run.startedAt.getTime() : null,
+      },
+    });
+  }
+
   async updateTaskStatus(taskId: string, status: string) {
     return this.#prisma.task.update({
       where: { id: taskId },
@@ -445,9 +568,11 @@ export class RunStore {
 
     const runs: RunCounts = {
       total: 0,
+      queued: 0,
       active: 0,
       completed: 0,
       failed: 0,
+      cancelled: 0,
     };
 
     for (const group of runGroups) {

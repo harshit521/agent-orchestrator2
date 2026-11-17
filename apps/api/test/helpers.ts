@@ -41,6 +41,9 @@ export function testConfig(
       authorName: "TaskFleet Test",
       authorEmail: "test@taskfleet.dev",
     },
+    scheduler: {
+      maxConcurrentRuns: 3,
+    },
     security: {
       enabled: false,
       policy: "fail-closed",

@@ -19,6 +19,7 @@ import { registerSecurityRoutes } from "./http/security-routes.js";
 import { RunEventBus } from "./runs/event-bus.js";
 import { RunService, type GitHubIntegration } from "./runs/run-service.js";
 import { RunStore } from "./runs/run-store.js";
+import { SchedulerService } from "./scheduler/SchedulerService.js";
 import { SecurityScanner } from "./security/scanner.js";
 import { WorktreeService } from "./worktrees/worktree-service.js";
 
@@ -136,11 +137,30 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     github,
   });
 
+  const scheduler = new SchedulerService({
+    store,
+    config,
+    logger: app.log,
+    execute: (runId) => lifecycle.executeRun(runId),
+  });
+
+  lifecycle.attachScheduler(scheduler);
+
+  app.addHook("onReady", async () => {
+    try {
+      await lifecycle.recoverInterruptedRuns();
+      scheduler.drain();
+    } catch (error: unknown) {
+      app.log.error({ err: error }, "Startup run recovery failed");
+    }
+  });
+
   const apiDeps = {
     agents,
     store,
     events,
     runService: lifecycle,
+    scheduler,
     worktrees: {
       enabled: config.worktrees.enabled,
       service: worktreeService,
@@ -259,6 +279,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   }
 
   app.addHook("onClose", async () => {
+    await scheduler.shutdown();
     await prisma.$disconnect();
   });
 

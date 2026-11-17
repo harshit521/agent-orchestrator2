@@ -98,6 +98,8 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(120_000),
+
+  MAX_CONCURRENT_RUNS: z.coerce.number().int().min(1).max(100).default(3),
 });
 
 export interface LLMConfig {
@@ -141,6 +143,10 @@ export interface GitConfig {
   authorEmail: string;
 }
 
+export interface SchedulerConfig {
+  maxConcurrentRuns: number;
+}
+
 export interface AppConfig {
   nodeEnv: "development" | "test" | "production";
   port: number;
@@ -151,6 +157,7 @@ export interface AppConfig {
   worktrees: WorktreeConfig;
   agent: AgentConfig;
   git: GitConfig;
+  scheduler: SchedulerConfig;
   security: {
     enabled: boolean;
     policy: "fail-closed" | "warn-only"; // fail-closed blocks on blocking findings, warn-only reports warnings
@@ -237,6 +244,9 @@ export function loadConfig(
     git: {
       authorName: data.GIT_AUTHOR_NAME,
       authorEmail: data.GIT_AUTHOR_EMAIL,
+    },
+    scheduler: {
+      maxConcurrentRuns: data.MAX_CONCURRENT_RUNS,
     },
     security: {
       enabled: data.SECURITY_ENABLED,

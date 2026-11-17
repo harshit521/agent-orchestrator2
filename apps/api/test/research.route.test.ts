@@ -165,7 +165,7 @@ describe("TaskFleet API", () => {
     expect(createdBody.task).toMatchObject({
       title: "Add rate limiting to the auth endpoint",
       agentId: "research-agent",
-      status: "running",
+      status: "queued",
     });
     expect(createdBody.run.id).toEqual(expect.any(String));
 
@@ -175,6 +175,7 @@ describe("TaskFleet API", () => {
     expect(run.provider).toBe("stub");
     expect(run.durationMs).toBeGreaterThanOrEqual(0);
     expect(run.events.map((event: { type: string }) => event.type)).toEqual([
+      "run.queued",
       "run.started",
       "agent.started",
       "agent.progress",
@@ -204,7 +205,8 @@ describe("TaskFleet API", () => {
       status: "completed",
     });
     expect(taskBody.task.runs[0].status).toBe("completed");
-    expect(taskBody.task.runs[0].events[0].type).toBe("run.started");
+    expect(taskBody.task.runs[0].events[0].type).toBe("run.queued");
+    expect(taskBody.task.runs[0].events[1].type).toBe("run.started");
 
     const list = await app.inject({ method: "GET", url: "/tasks" });
     expect(list.statusCode).toBe(200);

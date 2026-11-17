@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 
 export type RunEventType =
+  | "run.queued"
   | "run.started"
   | "workspace.created"
   | "workspace.removed"

@@ -166,7 +166,8 @@ describe("Task CRUD and dashboard endpoints", () => {
       type: "run.completed",
       percent: 100,
     });
-    expect(run.events[1]).toMatchObject({ type: "agent.started" });
+    expect(run.events[1]).toMatchObject({ type: "run.started" });
+    expect(run.events[2]).toMatchObject({ type: "agent.started" });
 
     const task = await app.inject({
       method: "GET",

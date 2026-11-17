@@ -117,7 +117,11 @@ async function waitForRun(app: FastifyInstance, runId: string) {
     });
     const body = response.json();
 
-    if (body.run?.status === "completed" || body.run?.status === "failed") {
+    if (
+      body.run?.status === "completed" ||
+      body.run?.status === "failed" ||
+      body.run?.status === "cancelled"
+    ) {
       return body.run;
     }
 
@@ -460,7 +464,7 @@ describe("run cancellation", () => {
     db.cleanup();
   });
 
-  it("aborts an active agent and persists a cancelled failure", async () => {
+  it("aborts an active agent and persists a cancelled run", async () => {
     const created = await app.inject({
       method: "POST",
       url: "/tasks",
@@ -487,8 +491,9 @@ describe("run cancellation", () => {
 
     const run = await waitForRun(app, runId);
 
-    expect(run.status).toBe("failed");
+    expect(run.status).toBe("cancelled");
     expect(run.errorCode).toBe("CANCELLED");
-    expect(run.events.at(-1)).toMatchObject({ type: "run.failed" });
+    expect(run.cancelReason).toBeTruthy();
+    expect(run.events.at(-1)).toMatchObject({ type: "run.cancelled" });
   });
 });

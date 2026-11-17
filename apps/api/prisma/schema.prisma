@@ -45,8 +45,10 @@ model Run {
   commitSha       String?
   pullRequestUrl  String?
   baseBranch      String?
+  cancelReason    String?
   startedAt       DateTime  @default(now())
   completedAt     DateTime?
+  cancelledAt     DateTime?
   durationMs      Int?
 
   task      Task          @relation(fields: [taskId], references: [id], onDelete: Cascade)

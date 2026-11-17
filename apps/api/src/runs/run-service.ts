@@ -55,6 +55,12 @@ export interface RunServiceDeps {
   github: GitHubIntegration | null;
 }
 
+/** The subset of the scheduler the lifecycle needs. */
+export interface RunScheduler {
+  enqueue(runId: string): void;
+  remove(runId: string): boolean;
+}
+
 export class UnknownAgentError extends Error {
   constructor(agentId: string) {
     super(`Unknown agent: ${agentId}`);
@@ -99,6 +105,9 @@ export class RunService {
   readonly #worktrees: RunServiceDeps["worktrees"];
   readonly #github: GitHubIntegration | null;
   readonly #controllers = new Map<string, AbortController>();
+  readonly #activeRuns = new Set<string>();
+  readonly #cancelRequests = new Set<string>();
+  #scheduler: RunScheduler | null = null;
   #pending: Promise<void> = Promise.resolve();
 
   constructor(deps: RunServiceDeps) {
@@ -111,7 +120,7 @@ export class RunService {
     this.#github = deps.github;
   }
 
-  /** Creates a task and immediately starts its first run in the background. */
+  /** Creates a task and queues its first run. */
   async startTask(request: StartTaskRequest) {
     const agent = this.#requireAgent(request.agentId);
     const { task, run } = await this.#store.createTaskWithRun({
@@ -121,7 +130,7 @@ export class RunService {
       priority: request.priority ?? "medium",
     });
 
-    this.#launch(task.id, run.id, agent, request.prompt, task.title);
+    await this.#enqueueRun(task.id, run.id, agent.name);
 
     return { task, run };
   }
@@ -153,7 +162,7 @@ export class RunService {
       agent.id
     );
 
-    this.#launch(task.id, run.id, agent, task.prompt, task.title);
+    await this.#enqueueRun(task.id, run.id, agent.name);
 
     return { task: updatedTask, run };
   }
@@ -167,6 +176,12 @@ export class RunService {
       agentId: agent.id,
       priority: request.priority ?? "medium",
     });
+    const claimed = await this.#store.claimRun(run.id);
+
+    if (!claimed) {
+      throw new Error("Failed to claim the run for synchronous execution.");
+    }
+
     const result = await this.#execute(
       task.id,
       run.id,
@@ -178,37 +193,162 @@ export class RunService {
     return { task, run, result };
   }
 
-  /** Cooperatively cancels a running agent and its child processes. */
-  cancelRun(runId: string): boolean {
+  attachScheduler(scheduler: RunScheduler): void {
+    this.#scheduler = scheduler;
+  }
+
+  /**
+   * Cancels a queued run immediately, or aborts a running agent and its child
+   * processes. Returns false when the run is already terminal.
+   */
+  async cancelRun(runId: string): Promise<boolean> {
     const controller = this.#controllers.get(runId);
 
-    if (!controller) {
+    if (controller) {
+      this.#cancelRequests.add(runId);
+      controller.abort();
+      return true;
+    }
+
+    const run = await this.#store.getRun(runId);
+
+    if (!run || (run.status !== "queued" && run.status !== "running")) {
       return false;
     }
 
-    controller.abort();
+    this.#scheduler?.remove(runId);
+    this.#cancelRequests.add(runId);
+    const reason =
+      run.status === "queued"
+        ? "Cancelled before execution."
+        : "Cancelled by user.";
+
+    await this.#store.markRunCancelled(runId, reason);
+    await this.#store.updateTaskStatus(run.taskId, "failed");
+    await this.#record(runId, run.taskId, {
+      type: "run.cancelled",
+      stage: "cancelled",
+      message: reason,
+      percent: 100,
+      data: { reason },
+    });
+
     return true;
   }
 
   isRunning(runId: string): boolean {
-    return this.#controllers.has(runId);
+    return this.#controllers.has(runId) || this.#activeRuns.has(runId);
   }
 
-  #launch(
+  /** Executes one run claimed by the scheduler. Safe to call twice. */
+  async executeRun(runId: string): Promise<void> {
+    if (this.#activeRuns.has(runId)) {
+      return;
+    }
+
+    const run = await this.#store.getRun(runId);
+
+    if (!run || (run.status !== "running" && run.status !== "queued")) {
+      return;
+    }
+
+    const agent = this.#agents.get(run.task.agentId);
+
+    if (!agent) {
+      const message = `Unknown agent: ${run.task.agentId}`;
+      await this.#store.markRunFailed(runId, "UNKNOWN_AGENT", message);
+      await this.#store.updateTaskStatus(run.taskId, "failed");
+      await this.#record(runId, run.taskId, {
+        type: "run.failed",
+        stage: "failed",
+        message,
+        percent: 100,
+        data: { code: "UNKNOWN_AGENT" },
+      });
+      return;
+    }
+
+    this.#activeRuns.add(runId);
+
+    try {
+      if (run.status === "queued") {
+        const claimed = await this.#store.claimRun(runId);
+
+        if (!claimed) {
+          return;
+        }
+      }
+
+      await this.#store.updateTaskStatus(run.taskId, "running");
+      await this.#execute(
+        run.taskId,
+        runId,
+        agent,
+        run.task.prompt,
+        run.task.title
+      );
+    } finally {
+      this.#activeRuns.delete(runId);
+    }
+  }
+
+  /**
+   * Startup policy: a run that was `running` when the process exited can no
+   * longer be observed, so it is failed explicitly instead of being left stuck.
+   */
+  async recoverInterruptedRuns(): Promise<number> {
+    const runs = await this.#store.listRunningRuns();
+
+    for (const run of runs) {
+      const message =
+        "The API restarted while this run was executing; it was marked failed to avoid a permanently stuck run.";
+
+      await this.#store.markRunFailed(
+        run.id,
+        "INTERRUPTED_BY_RESTART",
+        message
+      );
+      await this.#store.updateTaskStatus(run.taskId, "failed");
+      await this.#record(run.id, run.taskId, {
+        type: "run.failed",
+        stage: "failed",
+        message,
+        percent: 100,
+        data: { code: "INTERRUPTED_BY_RESTART" },
+      });
+    }
+
+    if (runs.length > 0) {
+      this.#logger.info(
+        { count: runs.length },
+        "Recovered interrupted runs on startup"
+      );
+    }
+
+    return runs.length;
+  }
+
+  async #enqueueRun(
     taskId: string,
     runId: string,
-    agent: Agent,
-    prompt: string,
-    title: string
-  ): void {
-    void this.#execute(taskId, runId, agent, prompt, title).catch(
-      (error: unknown) => {
-        this.#logger.error(
-          { err: error, taskId, runId },
-          "Background run failed"
-        );
-      }
-    );
+    agentName: string
+  ): Promise<void> {
+    await this.#record(runId, taskId, {
+      type: "run.queued",
+      stage: "queued",
+      message: `Queued for ${agentName}`,
+      percent: 0,
+    });
+
+    if (this.#scheduler) {
+      this.#scheduler.enqueue(runId);
+      return;
+    }
+
+    // Direct embedding (tests/CLI) has no scheduler; execute immediately.
+    void this.executeRun(runId).catch((error: unknown) => {
+      this.#logger.error({ err: error, taskId, runId }, "Background run failed");
+    });
   }
 
   #requireAgent(agentId: string): Agent {
@@ -243,6 +383,10 @@ export class RunService {
     const startedAt = new Date();
     const controller = new AbortController();
     this.#controllers.set(runId, controller);
+
+    if (this.#cancelRequests.has(runId)) {
+      controller.abort();
+    }
 
     let worktree: Worktree | null = null;
     let result: AgentResult | null = null;
@@ -341,15 +485,24 @@ export class RunService {
         );
 
         if (worktree) {
-          result = await this.#postProcessCodingRun({
-            taskId,
-            runId,
-            title,
-            worktree,
-            result,
-            startedAt,
-            signal: controller.signal,
-          });
+          if (controller.signal.aborted) {
+            result = this.#failure(
+              "CANCELLED",
+              "The run was cancelled by the user.",
+              startedAt,
+              result
+            );
+          } else {
+            result = await this.#postProcessCodingRun({
+              taskId,
+              runId,
+              title,
+              worktree,
+              result,
+              startedAt,
+              signal: controller.signal,
+            });
+          }
         }
       }
     } catch (error: unknown) {
@@ -376,8 +529,33 @@ export class RunService {
       result ??
       this.#failure("RUN_FAILED", "The run ended without a result.", startedAt);
 
+    const wasCancelled =
+      controller.signal.aborted ||
+      this.#cancelRequests.has(runId) ||
+      finalResult.error?.code === "CANCELLED";
+
     // Make sure progress events are durable before the terminal event.
     await this.#pending;
+
+    if (wasCancelled) {
+      const reason =
+        finalResult.error?.message ?? "The run was cancelled by the user.";
+
+      await this.#store.markRunCancelled(runId, reason);
+      await this.#store.updateTaskStatus(taskId, "failed");
+      this.#cancelRequests.delete(runId);
+
+      await this.#record(runId, taskId, {
+        type: "run.cancelled",
+        stage: "cancelled",
+        message: reason,
+        percent: 100,
+        data: { code: "CANCELLED", reason },
+      });
+
+      return finalResult;
+    }
+
     await this.#store.completeRun(runId, finalResult);
 
     const taskStatus =
@@ -455,6 +633,15 @@ export class RunService {
   }): Promise<AgentResult> {
     const { taskId, runId, title, worktree, signal } = input;
     const service = this.#requireWorktreeService();
+
+    if (signal.aborted) {
+      return this.#failure(
+        "CANCELLED",
+        "The run was cancelled before post-processing.",
+        input.startedAt,
+        input.result
+      );
+    }
 
     let diff: WorktreeDiff;
 
@@ -569,6 +756,16 @@ export class RunService {
 
     // Re-stage in case the test runner generated files that are not ignored.
     diff = await service.diff(worktree);
+
+    if (signal.aborted) {
+      return this.#failure(
+        "CANCELLED",
+        "The run was cancelled before committing changes.",
+        input.startedAt,
+        input.result,
+        { tests: testResult }
+      );
+    }
 
     const commitMessage = [
       `taskfleet: ${title}`,

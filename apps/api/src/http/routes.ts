@@ -10,6 +10,7 @@ import type {
   UpdateTaskInput,
 } from "../runs/run-store.js";
 import type { WorktreeService } from "../worktrees/worktree-service.js";
+import type { SchedulerService } from "../scheduler/SchedulerService.js";
 import { eventToDto, artifactToDto, parseJsonValue, runToDto } from "../runs/run-dto.js";
 import {
   RunService,
@@ -54,6 +55,7 @@ export interface RouteDependencies {
   store: RunStore;
   events: RunEventBus;
   runService: RunService;
+  scheduler: SchedulerService;
   worktrees: {
     enabled: boolean;
     service: WorktreeService;
@@ -117,15 +119,17 @@ export function registerRoutes(
   }));
 
   app.get("/stats", async () => {
-    const [stats, recentActivity] = await Promise.all([
+    const [stats, recentActivity, scheduler] = await Promise.all([
       deps.store.getStats(),
       deps.store.listRecentActivity(12),
+      deps.scheduler.getState(),
     ]);
 
     return {
       success: true,
       tasks: stats.tasks,
       runs: stats.runs,
+      scheduler,
       agents: { total: deps.agents.list().length },
       activeRuns: stats.activeRuns.map((run) => ({
         ...runToDto(run),
@@ -434,9 +438,21 @@ export function registerRoutes(
         : {}),
     });
 
+    const queuedPositions = new Map(
+      (await deps.store.listQueuedRuns(200)).map((run, index) => [
+        run.id,
+        index + 1,
+      ])
+    );
+
     return {
       success: true,
-      runs: runs.map(runToDto),
+      runs: runs.map((run) => ({
+        ...runToDto(run),
+        ...(queuedPositions.has(run.id)
+          ? { queuePosition: queuedPositions.get(run.id) }
+          : {}),
+      })),
     };
   });
 
@@ -455,6 +471,9 @@ export function registerRoutes(
         success: true,
         run: {
           ...runToDto(run),
+          ...(run.status === "queued"
+            ? { queuePosition: await deps.scheduler.queuePosition(run.id) }
+            : {}),
           events: run.events.map(eventToDto),
           artifacts: run.artifacts.map(artifactToDto),
         },
@@ -473,20 +492,19 @@ export function registerRoutes(
           .send({ success: false, error: "Run not found." });
       }
 
-      if (run.status !== "running") {
+      if (run.status !== "queued" && run.status !== "running") {
         return reply.status(409).send({
           success: false,
           error: "The run has already finished.",
         });
       }
 
-      const cancelled = deps.runService.cancelRun(run.id);
+      const cancelled = await deps.runService.cancelRun(run.id);
 
       if (!cancelled) {
         return reply.status(409).send({
           success: false,
-          error:
-            "The run is not active in this process and cannot be cancelled.",
+          error: "The run could not be cancelled.",
         });
       }
 
@@ -558,7 +576,11 @@ export function registerRoutes(
 
         writeEvent(event);
 
-        if (event.type === "run.completed" || event.type === "run.failed") {
+        if (
+          event.type === "run.completed" ||
+          event.type === "run.failed" ||
+          event.type === "run.cancelled"
+        ) {
           finish();
         }
       });
@@ -572,7 +594,10 @@ export function registerRoutes(
 
       streaming = true;
 
-      let reachedTerminal = run.status !== "running";
+      let reachedTerminal =
+        run.status === "completed" ||
+        run.status === "failed" ||
+        run.status === "cancelled";
 
       for (const event of buffered) {
         if (typeof event.id === "string" && seen.has(event.id)) {
@@ -581,7 +606,9 @@ export function registerRoutes(
 
         writeEvent(event);
         reachedTerminal ||=
-          event.type === "run.completed" || event.type === "run.failed";
+          event.type === "run.completed" ||
+          event.type === "run.failed" ||
+          event.type === "run.cancelled";
       }
 
       if (reachedTerminal) {
